@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<title>Spacing Trainer 1D</title>
+<style>
+  body {
+    margin: 0;
+    background: #1a1a1a;
+    overflow: hidden;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    user-select: none;
+    color: white;
+  }
+  canvas {
+    display: block;
+  }
+  #ui {
+    position: absolute;
+    top: 20px;
+    left: 0;
+    width: 100%;
+    text-align: center;
+    pointer-events: none;
+  }
+  .key {
+    background: #333;
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid #555;
+    font-weight: bold;
+    font-family: monospace;
+  }
+</style>
+</head>
+<body>
+
+<div id="ui">
+  <h1 style="margin: 0; font-size: 24px;">SPACING DUEL</h1>
+  <div style="margin-top: 10px; font-size: 16px;">
+    Hareket: <span class="key">Sağ Tık (Mouse)</span>
+    &nbsp;|&nbsp; 
+    Menzil: <span class="key" id="range-key-display">A</span>
+    &nbsp;|&nbsp; 
+    Saldırı: <span class="key">Rakibe Sol Tık</span>
+  </div>
+  <div id="status" style="margin-top: 20px; font-size: 18px; color: #aaa;">Hazır ol...</div>
+  <div id="score-display" style="margin-top: 5px; font-size: 16px; color: #8cf;">Skor: 0</div>
+  <div style="margin-top: 5px; font-size: 12px; opacity: 0.7;">Rakip menziline girmeden onu vur!</div>
+  
+  <!-- Settings Button -->
+  <button id="settings-btn" style="pointer-events: auto; margin-top: 15px; cursor: pointer; background: #333; color: #ddd; border: 1px solid #555; padding: 5px 12px; border-radius: 4px; font-family: inherit;">Ayarlar</button>
+</div>
+
+<!-- Settings Modal -->
+<div id="settings-modal" style="display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #222; padding: 25px; border: 1px solid #555; border-radius: 8px; text-align: center; z-index: 100; box-shadow: 0 4px 20px rgba(0,0,0,0.5);">
+  <h3 style="margin-top: 0; color: #fff;">Tuş Ayarları</h3>
+  <div style="margin-bottom: 20px; color: #ddd;">
+    Menzil Gösterge Tuşu: <button id="rebind-btn" class="key" style="cursor: pointer; font-size: 16px;">A</button>
+  </div>
+  <button id="close-settings" style="cursor: pointer; padding: 6px 16px; background: #444; color: white; border: none; border-radius: 4px;">Kapat</button>
+</div>
+
+<canvas id="game"></canvas>
+
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+// ---------------- STATE (GLOBAL) ----------------
+let cw, ch; // Canvas width/height
+let laneY;  // Y position of the lane
+let player = { x: 0, y: 0, targetX: 0, targetY: 0, color: "#4f8" };
+let enemy = { x: 0, color: "#f44" };
+let gameState = "start"; // start, playing, lose
+let keys = {};
+let keyBindings = { range: 'a' };
+let isRebinding = false;
+let playerAttackTimer = 0;
+let enemyAttackTimer = 0;
+let score = 0;
+let frameCount = 0;
+let lastHitFrame = -9999;
+let enemyWasInPlayerRange = false;
+let enemyPatrolDirection = 1;
+let patrolZoneMin = 0;
+let patrolZoneMax = 0;
+let tooFarTimer = 0;
+
+// ---------------- DOM ELEMENTS ----------------
+const uiStatus = document.getElementById("status");
+const scoreDisplay = document.getElementById("score-display");
+const settingsBtn = document.getElementById("settings-btn");
+const settingsModal = document.getElementById("settings-modal");
+const rebindBtn = document.getElementById("rebind-btn");
+const closeSettingsBtn = document.getElementById("close-settings");
+const rangeKeyDisplay = document.getElementById("range-key-display");
+
+// ---------------- CONFIG ----------------
+const PLAYER_RANGE = 210;
+const ENEMY_RANGE = 160;
+const PLAYER_SPEED = 6;
+const ENEMY_SPEED = 3.5;
+const TOO_FAR_MARGIN = 80;
+const TOO_FAR_FRAMES = 150;
+const MISSED_OPPORTUNITY_GRACE_FRAMES = 25;
+const PATROL_ZONE_MIN_RATIO = 0.35;
+const PATROL_ZONE_MAX_RATIO = 0.65;
+const VERTICAL_MOVE_LIMIT = 100; // New: Limit for vertical movement around laneY
+
+// ---------------- EVENT LISTENERS (UI) ----------------
+settingsBtn.addEventListener("click", () => {
+  settingsModal.style.display = "block";
+});
+closeSettingsBtn.addEventListener("click", () => {
+  settingsModal.style.display = "none";
+  isRebinding = false;
+  rebindBtn.innerText = keyBindings.range.toUpperCase();
+});
+rebindBtn.addEventListener("click", () => {
+  isRebinding = true;
+  rebindBtn.innerText = "...";
+});
+
+function resize() {
+  cw = canvas.width = window.innerWidth;
+  ch = canvas.height = window.innerHeight;
+  laneY = ch / 2;
+  
+  if (gameState === "start") resetGame();
+}
+window.addEventListener("resize", resize);
+
+// ---------------- INPUT (GAME) ----------------
+// Mouse Movement & Attack
+window.addEventListener("mousedown", e => {
+  if (gameState !== "playing") return;
+
+  // Right Click (2) -> Move
+  if (e.button === 2) {
+      player.targetX = e.clientX;
+      player.targetY = e.clientY;
+      // Clamp to screen and vertical limit
+      player.targetX = Math.max(0, Math.min(cw, player.targetX));
+      player.targetY = Math.max(laneY - VERTICAL_MOVE_LIMIT, Math.min(laneY + VERTICAL_MOVE_LIMIT, player.targetY));
+  }
+
+  // Left Click (0) -> ATTACK if clicked on Enemy
+  if (e.button === 0) {
+    // Check if clicked on enemy (with generous hitbox)
+    const distMouse = Math.hypot(e.clientX - enemy.x, e.clientY - laneY);
+    if (distMouse <= 50) { // 20 radius + 30 padding
+       tryAttack();
+    }
+  }
+});
+
+// Prevent context menu on right click
+window.addEventListener("contextmenu", e => {
+  e.preventDefault();
+  // Movement handled in mousedown
+});
+
+window.addEventListener("keydown", e => {
+  // Rebinding Logic
+  if (isRebinding) {
+    keyBindings.range = e.key.toLowerCase();
+    rebindBtn.innerText = e.key.toUpperCase();
+    rangeKeyDisplay.innerText = e.key.toUpperCase();
+    isRebinding = false;
+    return;
+  }
+
+  keys[e.key.toLowerCase()] = true;
+  
+  // Restart
+  if (gameState !== "playing" && e.code === "Space") {
+    resetGame();
+    return;
+  }
+});
+
+window.addEventListener("keyup", e => {
+  keys[e.key.toLowerCase()] = false;
+});
+
+// ---------------- LOGIC ----------------
+function resetGame() {
+  patrolZoneMin = cw * PATROL_ZONE_MIN_RATIO;
+  patrolZoneMax = cw * PATROL_ZONE_MAX_RATIO;
+  player.x = cw * 0.2;
+  player.y = laneY;
+  player.targetX = player.x;
+  player.targetY = player.y;
+  enemy.x = patrolZoneMin;
+  enemyPatrolDirection = 1;
+  gameState = "playing";
+  uiStatus.innerText = "Dövüş Başladı!";
+  uiStatus.style.color = "white";
+  playerAttackTimer = 0;
+  enemyAttackTimer = 0;
+  score = 0;
+  frameCount = 0;
+  lastHitFrame = -9999;
+  enemyWasInPlayerRange = false;
+  tooFarTimer = 0;
+}
+
+function tryAttack() {
+  if (playerAttackTimer > 0) return;
+  
+  playerAttackTimer = 15;
+  const dist = Math.abs(player.x - enemy.x);
+  
+  if (dist <= PLAYER_RANGE) {
+    score++;
+    lastHitFrame = frameCount;
+  }
+}
+
+function loseGame(reason) {
+  gameState = "lose";
+  uiStatus.innerText = "KAYBETTİN: " + reason;
+  uiStatus.style.color = "#f44";
+}
+
+function updateAI() {
+  const dist = Math.abs(player.x - enemy.x);
+
+  enemy.x += ENEMY_SPEED * enemyPatrolDirection;
+  if (enemy.x >= patrolZoneMax) {
+    enemyPatrolDirection = -1;
+    enemy.x = patrolZoneMax;
+  } else if (enemy.x <= patrolZoneMin) {
+    enemyPatrolDirection = 1;
+    enemy.x = patrolZoneMin;
+  }
+
+  if (dist <= ENEMY_RANGE) {
+    loseGame("Rakip menziline girdi!");
+  }
+}
+
+function update() {
+  if (gameState !== "playing") return;
+
+  frameCount++;
+
+  // Player Move (Towards Target) - Updated for both x and y
+  const dx = player.targetX - player.x;
+  if (Math.abs(dx) > PLAYER_SPEED) {
+    player.x += Math.sign(dx) * PLAYER_SPEED;
+  } else {
+    player.x = player.targetX;
+  }
+  player.x = Math.max(0, Math.min(cw, player.x));
+
+  const dy = player.targetY - player.y;
+  if (Math.abs(dy) > PLAYER_SPEED) {
+    player.y += Math.sign(dy) * PLAYER_SPEED;
+  } else {
+    player.y = player.targetY;
+  }
+  player.y = Math.max(laneY - VERTICAL_MOVE_LIMIT, Math.min(laneY + VERTICAL_MOVE_LIMIT, player.y));
+
+  // AI Move (Fail 1 checked inside updateAI)
+  updateAI();
+
+  const dist = Math.abs(player.x - enemy.x);
+  const inPlayerRange = dist <= PLAYER_RANGE;
+
+  // Fail 2: Enemy just exited our range and we didn't hit during their visit - REMOVED
+  /*
+  if (enemyWasInPlayerRange && !inPlayerRange) {
+    const hitRecently = (frameCount - lastHitFrame) <= MISSED_OPPORTUNITY_GRACE_FRAMES;
+    if (!hitRecently) {
+      loseGame("Kaçırılan fırsat – menzilde vurmadın!");
+      return;
+    }
+  }
+  */
+  enemyWasInPlayerRange = inPlayerRange;
+
+  // Fail 3: Too far for too long (spacing broken) - REMOVED
+  /*
+  if (dist > PLAYER_RANGE + TOO_FAR_MARGIN) {
+    tooFarTimer++;
+    if (tooFarTimer >= TOO_FAR_FRAMES) {
+      loseGame("Çok geri kaçtın – spacing bozuldu!");
+      return;
+    }
+  } else {
+    tooFarTimer = 0;
+  }
+  */
+
+  if (playerAttackTimer > 0) playerAttackTimer--;
+  if (scoreDisplay) scoreDisplay.innerText = "Skor: " + score;
+}
+
+// ---------------- RENDER ----------------
+function draw() {
+  // BG
+  ctx.fillStyle = "#1a1a1a";
+  ctx.fillRect(0, 0, cw, ch);
+  
+  // Lane
+  ctx.strokeStyle = "#444";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, laneY);
+  ctx.lineTo(cw, laneY);
+  ctx.stroke();
+
+  // Patrol zone (rakibin devriye alanı)
+  if (patrolZoneMax > patrolZoneMin) {
+    ctx.fillStyle = "rgba(255, 80, 80, 0.08)";
+    ctx.fillRect(patrolZoneMin, 0, patrolZoneMax - patrolZoneMin, ch);
+    ctx.strokeStyle = "rgba(255, 100, 100, 0.5)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(patrolZoneMin, 0);
+    ctx.lineTo(patrolZoneMin, ch);
+    ctx.moveTo(patrolZoneMax, 0);
+    ctx.lineTo(patrolZoneMax, ch);
+    ctx.stroke();
+  }
+
+  // Draw Movement Target (Click Marker) - Updated to show at targetY
+  if (gameState === "playing" && (Math.abs(player.x - player.targetX) > 5 || Math.abs(player.y - player.targetY) > 5)) {
+    ctx.strokeStyle = "rgba(100, 255, 100, 0.5)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(player.targetX, player.targetY - 10);
+    ctx.lineTo(player.targetX, player.targetY + 10);
+    ctx.moveTo(player.targetX - 5, player.targetY + 5);
+    ctx.lineTo(player.targetX, player.targetY + 10);
+    ctx.lineTo(player.targetX + 5, player.targetY + 5);
+    ctx.stroke();
+  }
+  
+  // Draw Ranges (Visual Aid)
+  // Only show ranges if game is active or ended
+  
+  // We need to draw entities relative to their positions
+  
+  // 1. Enemy range ring (danger zone) - HIDDEN
+  /*
+  ctx.strokeStyle = "rgba(255, 80, 80, 0.6)";
+  ctx.lineWidth = 2;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.arc(enemy.x, laneY, ENEMY_RANGE, 0, Math.PI*2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  */
+
+  // Enemy Entity
+  ctx.beginPath();
+  ctx.arc(enemy.x, laneY, 20, 0, Math.PI*2);
+  ctx.fillStyle = enemy.color;
+  ctx.fill();
+  
+  // 2. Draw Player - Updated to use player.y
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, 20, 0, Math.PI*2);
+  ctx.fillStyle = player.color;
+  ctx.fill();
+  
+  // Player Attack Visual (Only visible when attacking or aiming)
+  // Show range if Range Key is held
+  if (keys[keyBindings.range] || playerAttackTimer > 0) {
+    // Draw Attack Range (Flash) - Updated to use player.y
+    ctx.fillStyle = playerAttackTimer > 0 ? "rgba(100, 255, 100, 0.3)" : "rgba(100, 255, 100, 0.05)";
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, PLAYER_RANGE, 0, Math.PI*2);
+    ctx.fill();
+    
+    if (playerAttackTimer > 0) {
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+    }
+    
+    // Range Indicator Border - Updated to use player.y
+    ctx.strokeStyle = "rgba(100, 255, 100, 0.8)";
+    ctx.setLineDash([5, 5]);
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, PLAYER_RANGE, 0, Math.PI*2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  
+  // Connect line - REMOVED
+  
+  // Overlay for End Screen (lose only – no win state)
+  if (gameState === "lose") {
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 32px Arial";
+    ctx.fillText("MAĞLUBİYET", cw/2, ch/2 - 40);
+    ctx.font = "18px Arial";
+    ctx.fillText("Skor: " + score, cw/2, ch/2);
+    ctx.font = "16px Arial";
+    ctx.fillText("Yeniden başlamak için SPACE tuşuna bas", cw/2, ch/2 + 30);
+  }
+  
+  requestAnimationFrame(draw);
+}
+
+// Loop
+setInterval(update, 1000/60);
+resize();
+requestAnimationFrame(draw);
+
+</script>
+</body>
+</html>
