@@ -46,6 +46,7 @@
   </div>
   <div id="status" style="margin-top: 20px; font-size: 18px; color: #aaa;">Hazır ol...</div>
   <div id="score-display" style="margin-top: 5px; font-size: 16px; color: #8cf;">Skor: 0</div>
+  <div id="level-display" style="margin-top: 2px; font-size: 14px; color: #8cf; opacity: 0.8;">Seviye: 1</div>
   <div style="margin-top: 5px; font-size: 12px; opacity: 0.7;">Rakip menziline girmeden onu vur!</div>
   
   <!-- Settings Button -->
@@ -58,6 +59,13 @@
   <div style="margin-bottom: 20px; color: #ddd;">
     Menzil Gösterge Tuşu: <button id="rebind-btn" class="key" style="cursor: pointer; font-size: 16px;">A</button>
   </div>
+  
+  <h3 style="margin-top: 0; color: #fff;">Zorluk Seviyesi</h3>
+  <div style="margin-bottom: 20px; color: #ddd;">
+    <button id="lvl1-btn" class="key" style="cursor: pointer; font-size: 16px; background: #4f8; color: #111; border-color: #4f8;">SEVİYE 1</button>
+    <button id="lvl2-btn" class="key" style="cursor: pointer; font-size: 16px; margin-left: 10px;">SEVİYE 2</button>
+  </div>
+
   <button id="close-settings" style="cursor: pointer; padding: 6px 16px; background: #444; color: white; border: none; border-radius: 4px;">Kapat</button>
 </div>
 
@@ -79,6 +87,7 @@ let isRebinding = false;
 let playerAttackTimer = 0;
 let enemyAttackTimer = 0;
 let score = 0;
+let currentLevel = 1;
 let frameCount = 0;
 let lastHitFrame = -9999;
 let enemyWasInPlayerRange = false;
@@ -90,9 +99,12 @@ let tooFarTimer = 0;
 // ---------------- DOM ELEMENTS ----------------
 const uiStatus = document.getElementById("status");
 const scoreDisplay = document.getElementById("score-display");
+const levelDisplay = document.getElementById("level-display");
 const settingsBtn = document.getElementById("settings-btn");
 const settingsModal = document.getElementById("settings-modal");
 const rebindBtn = document.getElementById("rebind-btn");
+const lvl1Btn = document.getElementById("lvl1-btn");
+const lvl2Btn = document.getElementById("lvl2-btn");
 const closeSettingsBtn = document.getElementById("close-settings");
 const rangeKeyDisplay = document.getElementById("range-key-display");
 
@@ -106,7 +118,6 @@ const TOO_FAR_FRAMES = 150;
 const MISSED_OPPORTUNITY_GRACE_FRAMES = 25;
 const PATROL_ZONE_MIN_RATIO = 0.35;
 const PATROL_ZONE_MAX_RATIO = 0.65;
-const VERTICAL_MOVE_LIMIT = 100; // New: Limit for vertical movement around laneY
 
 // ---------------- EVENT LISTENERS (UI) ----------------
 settingsBtn.addEventListener("click", () => {
@@ -121,6 +132,38 @@ rebindBtn.addEventListener("click", () => {
   isRebinding = true;
   rebindBtn.innerText = "...";
 });
+
+lvl1Btn.addEventListener("click", () => {
+  currentLevel = 1;
+  updateLevelUI();
+  resetGame();
+});
+
+lvl2Btn.addEventListener("click", () => {
+  currentLevel = 2;
+  updateLevelUI();
+  resetGame();
+});
+
+function updateLevelUI() {
+  if (levelDisplay) levelDisplay.innerText = "Seviye: " + currentLevel;
+  
+  if (currentLevel === 1) {
+    lvl1Btn.style.background = "#4f8";
+    lvl1Btn.style.color = "#111";
+    lvl1Btn.style.borderColor = "#4f8";
+    lvl2Btn.style.background = "#333";
+    lvl2Btn.style.color = "#ddd";
+    lvl2Btn.style.borderColor = "#555";
+  } else {
+    lvl2Btn.style.background = "#f44";
+    lvl2Btn.style.color = "#111";
+    lvl2Btn.style.borderColor = "#f44";
+    lvl1Btn.style.background = "#333";
+    lvl1Btn.style.color = "#ddd";
+    lvl1Btn.style.borderColor = "#555";
+  }
+}
 
 function resize() {
   cw = canvas.width = window.innerWidth;
@@ -139,10 +182,9 @@ window.addEventListener("mousedown", e => {
   // Right Click (2) -> Move
   if (e.button === 2) {
       player.targetX = e.clientX;
-      player.targetY = e.clientY;
-      // Clamp to screen and vertical limit
+      player.targetY = laneY; // Lock to laneY
+      // Clamp to screen
       player.targetX = Math.max(0, Math.min(cw, player.targetX));
-      player.targetY = Math.max(laneY - VERTICAL_MOVE_LIMIT, Math.min(laneY + VERTICAL_MOVE_LIMIT, player.targetY));
   }
 
   // Left Click (0) -> ATTACK if clicked on Enemy
@@ -186,8 +228,20 @@ window.addEventListener("keyup", e => {
 
 // ---------------- LOGIC ----------------
 function resetGame() {
-  patrolZoneMin = cw * PATROL_ZONE_MIN_RATIO;
-  patrolZoneMax = cw * PATROL_ZONE_MAX_RATIO;
+  if (currentLevel === 1) {
+    patrolZoneMin = cw * PATROL_ZONE_MIN_RATIO;
+    patrolZoneMax = cw * PATROL_ZONE_MAX_RATIO;
+  } else {
+    // Level 2: 50% narrower patrol zone
+    // Original width is 0.30 (0.65 - 0.35)
+    // New width should be 0.15
+    // Center is 0.50
+    const center = 0.5;
+    const halfWidth = 0.075; // 0.15 / 2
+    patrolZoneMin = cw * (center - halfWidth);
+    patrolZoneMax = cw * (center + halfWidth);
+  }
+
   player.x = cw * 0.2;
   player.y = laneY;
   player.targetX = player.x;
@@ -256,12 +310,8 @@ function update() {
   player.x = Math.max(0, Math.min(cw, player.x));
 
   const dy = player.targetY - player.y;
-  if (Math.abs(dy) > PLAYER_SPEED) {
-    player.y += Math.sign(dy) * PLAYER_SPEED;
-  } else {
-    player.y = player.targetY;
-  }
-  player.y = Math.max(laneY - VERTICAL_MOVE_LIMIT, Math.min(laneY + VERTICAL_MOVE_LIMIT, player.y));
+  // Vertical movement disabled
+  player.y = laneY;
 
   // AI Move (Fail 1 checked inside updateAI)
   updateAI();
