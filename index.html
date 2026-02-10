@@ -72,6 +72,11 @@
     <button id="mode-ahri-btn" class="key" style="cursor: pointer; font-size: 16px; margin-left: 10px;">AHRI DODGE</button>
   </div>
 
+  <h3 style="margin-top: 0; color: #fff;">Ekstra Özellikler</h3>
+  <div style="margin-bottom: 20px; color: #ddd;">
+    <button id="minion-mode-btn" class="key" style="cursor: pointer; font-size: 16px; background: #333; color: #ddd; border-color: #555;">MİNYONLAR: KAPALI</button>
+  </div>
+
   <button id="close-settings" style="cursor: pointer; padding: 6px 16px; background: #444; color: white; border: none; border-radius: 4px;">Kapat</button>
 </div>
 
@@ -103,8 +108,13 @@ let tooFarTimer = 0;
 let laneStart = { x: 0, y: 0 };
 let laneEnd = { x: 0, y: 0 };
 let gameMode = "normal"; // normal, ahri_dodge
+let minionMode = false;
 let lastTime = 0;
-let ahriOrb = { active: false, x: 0, y: 0, targetX: 0, targetY: 0, returnTarget: null, state: 'out', radius: 15 };
+let ahriOrb = { active: false, warning: false, warningTimer: 0, x: 0, y: 0, targetX: 0, targetY: 0, returnTarget: null, state: 'out', radius: 15 };
+let minions = [];
+let playerProjectiles = [];
+let playerQCooldown = 0;
+let minionSpawnTimer = 0;
 
 // ---------------- DOM ELEMENTS ----------------
 const uiStatus = document.getElementById("status");
@@ -117,6 +127,7 @@ const lvl1Btn = document.getElementById("lvl1-btn");
 const lvl2Btn = document.getElementById("lvl2-btn");
 const modeNormalBtn = document.getElementById("mode-normal-btn");
 const modeAhriBtn = document.getElementById("mode-ahri-btn");
+const minionModeBtn = document.getElementById("minion-mode-btn");
 const closeSettingsBtn = document.getElementById("close-settings");
 const rangeKeyDisplay = document.getElementById("range-key-display");
 
@@ -126,12 +137,16 @@ const ENEMY_RANGE = 160;
 const PLAYER_SPEED = 400; // px per second
 const ENEMY_SPEED = 240; // px per second
 const ORB_SPEED = 500; // px per second
+const PROJECTILE_SPEED = 600; // px per second
+const MINION_SPEED = 100; // px per second
+const MINION_SPAWN_RATE = 3.0; // seconds
+const PLAYER_Q_COOLDOWN = 0.5; // seconds
 const TOO_FAR_MARGIN = 80;
 const TOO_FAR_FRAMES = 2.5; // seconds
 const MISSED_OPPORTUNITY_GRACE_FRAMES = 0.4; // seconds
 const PATROL_ZONE_MIN_RATIO = 0.35;
 const PATROL_ZONE_MAX_RATIO = 0.65;
-const LANE_WIDTH = 180; // Width of the lane (vertical offset from center)
+let LANE_WIDTH = 180; // Width of the lane (vertical offset from center)
 
 // ---------------- EVENT LISTENERS (UI) ----------------
 settingsBtn.addEventListener("click", () => {
@@ -171,8 +186,14 @@ modeAhriBtn.addEventListener("click", () => {
   resetGame();
 });
 
+minionModeBtn.addEventListener("click", () => {
+  minionMode = !minionMode;
+  updateModeUI();
+  resetGame();
+});
+
 function updateLevelUI() {
-  if (levelDisplay) levelDisplay.innerText = "Seviye: " + currentLevel + " | Mod: " + (gameMode === "normal" ? "Normal" : "Ahri Dodge");
+  if (levelDisplay) levelDisplay.innerText = "Seviye: " + currentLevel + " | Mod: " + (gameMode === "normal" ? "Normal" : "Ahri Dodge") + (minionMode ? " + Minyonlar" : "");
   
   if (currentLevel === 1) {
     lvl1Btn.style.background = "#4f8";
@@ -209,6 +230,18 @@ function updateModeUI() {
     modeNormalBtn.style.color = "#ddd";
     modeNormalBtn.style.borderColor = "#555";
   }
+  
+  if (minionMode) {
+      minionModeBtn.style.background = "#4f8";
+      minionModeBtn.style.color = "#111";
+      minionModeBtn.style.borderColor = "#4f8";
+      minionModeBtn.innerText = "MİNYONLAR: AÇIK";
+  } else {
+      minionModeBtn.style.background = "#333";
+      minionModeBtn.style.color = "#ddd";
+      minionModeBtn.style.borderColor = "#555";
+      minionModeBtn.innerText = "MİNYONLAR: KAPALI";
+  }
 }
 
 // Init UI
@@ -222,6 +255,12 @@ function resize() {
   // Roughly start near bottom-left, end near top-right
   laneStart = { x: 0, y: ch * 0.85 };
   laneEnd = { x: cw, y: ch * 0.15 };
+  
+  if (gameMode === "ahri_dodge") {
+      LANE_WIDTH = 180 * 1.15; // 15% wider
+  } else {
+      LANE_WIDTH = 180;
+  }
   
   if (gameState === "start") resetGame();
 }
@@ -280,6 +319,11 @@ window.addEventListener("contextmenu", e => {
 });
 
 window.addEventListener("keydown", e => {
+  // Q Skillshot
+  if (minionMode && gameState === "playing" && e.key.toLowerCase() === 'q') {
+      tryFireProjectile();
+  }
+
   // Rebinding Logic
   if (isRebinding) {
     keyBindings.range = e.key.toLowerCase();
@@ -304,7 +348,15 @@ window.addEventListener("keyup", e => {
 
 // ---------------- LOGIC ----------------
 function resetGame() {
-  if (currentLevel === 1) {
+  if (gameMode === "ahri_dodge") {
+    // Ahri mode: Far right (end of diagonal), wider patrol zone
+    // Lane goes 0 to cw.
+    // Center 0.85, width significantly increased
+    const center = 0.85; 
+    const halfWidth = 0.20; // Increased from 0.08 to 0.15
+    patrolZoneMin = cw * (center - halfWidth);
+    patrolZoneMax = cw * (center + halfWidth);
+  } else if (currentLevel === 1) {
     patrolZoneMin = cw * PATROL_ZONE_MIN_RATIO;
     patrolZoneMax = cw * PATROL_ZONE_MAX_RATIO;
   } else {
@@ -324,6 +376,11 @@ function resetGame() {
   enemy.y = getLaneY(enemy.x);
   
   ahriOrb.active = false;
+  ahriOrb.warning = false;
+  minions = [];
+  playerProjectiles = [];
+  playerQCooldown = 0;
+  minionSpawnTimer = 0;
   
   enemyPatrolDirection = 1;
   gameState = "playing";
@@ -337,6 +394,47 @@ function resetGame() {
   enemyWasInPlayerRange = false;
   tooFarTimer = 0;
   lastTime = performance.now();
+  
+  // Update lane width based on mode
+  resize();
+}
+
+function tryFireProjectile() {
+    if (playerQCooldown > 0) return;
+    
+    // Fire projectile towards mouse? No, usually skillshots go towards mouse.
+    // We need mouse position. Let's track it or just use a stored value.
+    // For now, let's assume it shoots towards the enemy side of the lane if no mouse tracking.
+    // BUT user said "bizim qmüz düz mermi olsun".
+    // Ideally it should go towards mouse.
+    // Since we don't have mouse pos in keydown, let's track it globally.
+}
+// Add mouse tracking
+let mouseX = 0;
+let mouseY = 0;
+window.addEventListener("mousemove", e => {
+    mouseX = e.clientX;
+    mouseY = e.clientY;
+});
+
+// Redefine tryFireProjectile with mouse pos
+function tryFireProjectile() {
+    if (playerQCooldown > 0) return;
+    
+    playerQCooldown = PLAYER_Q_COOLDOWN;
+    
+    const dx = mouseX - player.x;
+    const dy = mouseY - player.y;
+    const mag = Math.hypot(dx, dy);
+    
+    playerProjectiles.push({
+        x: player.x,
+        y: player.y,
+        vx: (dx / mag) * PROJECTILE_SPEED,
+        vy: (dy / mag) * PROJECTILE_SPEED,
+        radius: 6,
+        active: true
+    });
 }
 
 function tryAttack() {
@@ -397,7 +495,8 @@ function updateAI(dt) {
               
               if (dist < orbStep) {
                   ahriOrb.active = false;
-                  enemyAttackTimer = 1.0; // Cooldown
+                  enemyAttackTimer = 1.0; // Reset timer
+                  ahriOrb.warning = false; // Reset warning
               } else {
                   ahriOrb.x += (dx / dist) * orbStep;
                   ahriOrb.y += (dy / dist) * orbStep;
@@ -410,18 +509,118 @@ function updateAI(dt) {
               loseGame("Ahri Q'suna yakalandın!");
           }
       } else {
+          // Cooldown phase
           if (enemyAttackTimer > 0) {
               enemyAttackTimer -= dt;
+              
+              const MAX_Q_RANGE = cw * 0.45; // Max range limit
+
+              // Warning phase (last 1 second)
+              if (enemyAttackTimer <= 1.0) {
+                   if (!ahriOrb.warning) {
+                       ahriOrb.warning = true;
+                   }
+                   
+                   // Calculate potential target
+                   let dx = player.x - enemy.x;
+                   let dy = player.y - enemy.y;
+                   let dist = Math.hypot(dx, dy);
+                   
+                   // Clamp to MAX_Q_RANGE
+                   if (dist > MAX_Q_RANGE) {
+                       let ratio = MAX_Q_RANGE / dist;
+                       ahriOrb.targetX = enemy.x + dx * ratio;
+                       ahriOrb.targetY = enemy.y + dy * ratio;
+                   } else {
+                       ahriOrb.targetX = player.x;
+                       ahriOrb.targetY = player.y;
+                   }
+              }
           } else {
               ahriOrb.active = true;
+              ahriOrb.warning = false;
               ahriOrb.x = enemy.x;
               ahriOrb.y = enemy.y;
               ahriOrb.state = 'out';
-              ahriOrb.targetX = player.x;
-              ahriOrb.targetY = player.y;
-              
-              // Extend target slightly to ensure it crosses player pos? 
-              // Ahri Q goes to target point. If player stands still, it hits.
+              // Target already set in warning phase
+          }
+      }
+  }
+
+  // Minion Logic
+  if (minionMode) {
+      minionSpawnTimer -= dt;
+      if (minionSpawnTimer <= 0) {
+          minionSpawnTimer = MINION_SPAWN_RATE;
+          
+          // Spawn minion
+          // Logic: "ahrinin biraz daha solundan gelsin" -> Left of Patrol Zone Min
+          // Use patrolZoneMin as reference if in Ahri mode, else use laneEnd
+          
+          let spawnX;
+          if (gameMode === "ahri_dodge") {
+              spawnX = patrolZoneMin - 50; // 50px left of Ahri's area
+          } else {
+              spawnX = laneEnd.x;
+          }
+          
+          const spawnYCenter = getLaneY(spawnX);
+          
+          minions.push({
+              x: spawnX,
+              y: spawnYCenter + (Math.random() * LANE_WIDTH * 1.5 - LANE_WIDTH * 0.75), // Random Y in lane
+              hp: 2,
+              radius: 12,
+              active: true
+          });
+      }
+      
+      // Update Minions
+      for (let i = minions.length - 1; i >= 0; i--) {
+          let m = minions[i];
+          // Move towards left (along the lane)
+          // Actually lane is diagonal, so we need to move along the lane vector.
+          const laneDx = laneStart.x - laneEnd.x;
+          const laneDy = laneStart.y - laneEnd.y;
+          const laneLen = Math.hypot(laneDx, laneDy);
+          
+          m.x += (laneDx / laneLen) * MINION_SPEED * dt;
+          m.y += (laneDy / laneLen) * MINION_SPEED * dt;
+          
+          if (m.x < -50) m.active = false;
+          
+          if (!m.active) {
+              minions.splice(i, 1);
+          }
+      }
+      
+      // Update Projectiles
+      if (playerQCooldown > 0) playerQCooldown -= dt;
+      
+      for (let i = playerProjectiles.length - 1; i >= 0; i--) {
+          let p = playerProjectiles[i];
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+          
+          // Collision with minions
+          for (let m of minions) {
+              if (!m.active) continue;
+              const dist = Math.hypot(p.x - m.x, p.y - m.y);
+              if (dist < p.radius + m.radius) {
+                  m.hp--;
+                  if (m.hp <= 0) {
+                      m.active = false;
+                      score++; // Bonus score for minion
+                  }
+                  p.active = false;
+                  break;
+              }
+          }
+          
+          if (p.x < 0 || p.x > cw || p.y < 0 || p.y > ch) p.active = false;
+          
+          if (!p.active) {
+              playerProjectiles.splice(i, 1);
           }
       }
   }
@@ -547,6 +746,38 @@ function draw() {
   ctx.fillStyle = enemy.color;
   ctx.fill();
   
+  // Ahri Orb Warning (Range Indicator)
+  if (gameMode === "ahri_dodge" && ahriOrb.warning) {
+      // Show range circle around Ahri
+      const MAX_Q_RANGE = cw * 0.45; // Same as logic
+      
+      ctx.fillStyle = "rgba(0, 255, 255, 0.1)"; // Faint cyan fill
+      ctx.beginPath();
+      ctx.arc(enemy.x, enemy.y, MAX_Q_RANGE, 0, Math.PI*2);
+      ctx.fill();
+      
+      ctx.strokeStyle = "rgba(0, 255, 255, 0.6)"; // Cyan border
+      ctx.lineWidth = 2;
+      ctx.setLineDash([10, 10]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Optional: Show target line clamped to range
+      if (ahriOrb.targetX) {
+        ctx.strokeStyle = "rgba(255, 0, 0, 0.5)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(enemy.x, enemy.y);
+        ctx.lineTo(ahriOrb.targetX, ahriOrb.targetY);
+        ctx.stroke();
+        
+        ctx.beginPath();
+        ctx.arc(ahriOrb.targetX, ahriOrb.targetY, 5, 0, Math.PI*2);
+        ctx.fillStyle = "red";
+        ctx.fill();
+      }
+  }
+  
   // Ahri Orb
   if (gameMode === "ahri_dodge" && ahriOrb.active) {
     ctx.beginPath();
@@ -556,6 +787,27 @@ function draw() {
     ctx.shadowColor = "#0ff";
     ctx.fill();
     ctx.shadowBlur = 0;
+  }
+  
+  // Minions
+  if (minionMode) {
+      for (let m of minions) {
+          ctx.beginPath();
+          ctx.arc(m.x, m.y, m.radius, 0, Math.PI*2);
+          ctx.fillStyle = "#ffaaaa";
+          ctx.fill();
+          ctx.strokeStyle = "#a33";
+          ctx.lineWidth = 1;
+          ctx.stroke();
+      }
+      
+      // Projectiles
+      for (let p of playerProjectiles) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.radius, 0, Math.PI*2);
+          ctx.fillStyle = "#ffff00";
+          ctx.fill();
+      }
   }
   
   // Player Entity
