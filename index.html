@@ -66,6 +66,12 @@
     <button id="lvl2-btn" class="key" style="cursor: pointer; font-size: 16px; margin-left: 10px;">SEVİYE 2</button>
   </div>
 
+  <h3 style="margin-top: 0; color: #fff;">Oyun Modu</h3>
+  <div style="margin-bottom: 20px; color: #ddd;">
+    <button id="mode-normal-btn" class="key" style="cursor: pointer; font-size: 16px; background: #4f8; color: #111; border-color: #4f8;">NORMAL</button>
+    <button id="mode-ahri-btn" class="key" style="cursor: pointer; font-size: 16px; margin-left: 10px;">AHRI DODGE</button>
+  </div>
+
   <button id="close-settings" style="cursor: pointer; padding: 6px 16px; background: #444; color: white; border: none; border-radius: 4px;">Kapat</button>
 </div>
 
@@ -96,6 +102,9 @@ let patrolZoneMax = 0;
 let tooFarTimer = 0;
 let laneStart = { x: 0, y: 0 };
 let laneEnd = { x: 0, y: 0 };
+let gameMode = "normal"; // normal, ahri_dodge
+let lastTime = 0;
+let ahriOrb = { active: false, x: 0, y: 0, targetX: 0, targetY: 0, returnTarget: null, state: 'out', radius: 15 };
 
 // ---------------- DOM ELEMENTS ----------------
 const uiStatus = document.getElementById("status");
@@ -106,17 +115,20 @@ const settingsModal = document.getElementById("settings-modal");
 const rebindBtn = document.getElementById("rebind-btn");
 const lvl1Btn = document.getElementById("lvl1-btn");
 const lvl2Btn = document.getElementById("lvl2-btn");
+const modeNormalBtn = document.getElementById("mode-normal-btn");
+const modeAhriBtn = document.getElementById("mode-ahri-btn");
 const closeSettingsBtn = document.getElementById("close-settings");
 const rangeKeyDisplay = document.getElementById("range-key-display");
 
 // ---------------- CONFIG ----------------
 const PLAYER_RANGE = 210;
 const ENEMY_RANGE = 160;
-const PLAYER_SPEED = 6;
-const ENEMY_SPEED = 3.5;
+const PLAYER_SPEED = 400; // px per second
+const ENEMY_SPEED = 240; // px per second
+const ORB_SPEED = 500; // px per second
 const TOO_FAR_MARGIN = 80;
-const TOO_FAR_FRAMES = 150;
-const MISSED_OPPORTUNITY_GRACE_FRAMES = 25;
+const TOO_FAR_FRAMES = 2.5; // seconds
+const MISSED_OPPORTUNITY_GRACE_FRAMES = 0.4; // seconds
 const PATROL_ZONE_MIN_RATIO = 0.35;
 const PATROL_ZONE_MAX_RATIO = 0.65;
 const LANE_WIDTH = 180; // Width of the lane (vertical offset from center)
@@ -147,8 +159,20 @@ lvl2Btn.addEventListener("click", () => {
   resetGame();
 });
 
+modeNormalBtn.addEventListener("click", () => {
+  gameMode = "normal";
+  updateModeUI();
+  resetGame();
+});
+
+modeAhriBtn.addEventListener("click", () => {
+  gameMode = "ahri_dodge";
+  updateModeUI();
+  resetGame();
+});
+
 function updateLevelUI() {
-  if (levelDisplay) levelDisplay.innerText = "Seviye: " + currentLevel;
+  if (levelDisplay) levelDisplay.innerText = "Seviye: " + currentLevel + " | Mod: " + (gameMode === "normal" ? "Normal" : "Ahri Dodge");
   
   if (currentLevel === 1) {
     lvl1Btn.style.background = "#4f8";
@@ -166,6 +190,29 @@ function updateLevelUI() {
     lvl1Btn.style.borderColor = "#555";
   }
 }
+
+function updateModeUI() {
+  updateLevelUI(); // Refresh text
+  
+  if (gameMode === "normal") {
+    modeNormalBtn.style.background = "#4f8";
+    modeNormalBtn.style.color = "#111";
+    modeNormalBtn.style.borderColor = "#4f8";
+    modeAhriBtn.style.background = "#333";
+    modeAhriBtn.style.color = "#ddd";
+    modeAhriBtn.style.borderColor = "#555";
+  } else {
+    modeAhriBtn.style.background = "#48f"; // Blue for Ahri
+    modeAhriBtn.style.color = "#fff";
+    modeAhriBtn.style.borderColor = "#48f";
+    modeNormalBtn.style.background = "#333";
+    modeNormalBtn.style.color = "#ddd";
+    modeNormalBtn.style.borderColor = "#555";
+  }
+}
+
+// Init UI
+updateModeUI();
 
 function resize() {
   cw = canvas.width = window.innerWidth;
@@ -276,28 +323,31 @@ function resetGame() {
   enemy.x = patrolZoneMin;
   enemy.y = getLaneY(enemy.x);
   
+  ahriOrb.active = false;
+  
   enemyPatrolDirection = 1;
   gameState = "playing";
   uiStatus.innerText = "Dövüş Başladı!";
   uiStatus.style.color = "white";
   playerAttackTimer = 0;
-  enemyAttackTimer = 0;
+  enemyAttackTimer = 1.0; // Initial delay for Ahri Q
   score = 0;
   frameCount = 0;
   lastHitFrame = -9999;
   enemyWasInPlayerRange = false;
   tooFarTimer = 0;
+  lastTime = performance.now();
 }
 
 function tryAttack() {
   if (playerAttackTimer > 0) return;
   
-  playerAttackTimer = 15;
+  playerAttackTimer = 0.25; // seconds (was 15 frames)
   const dist = Math.hypot(player.x - enemy.x, player.y - enemy.y);
   
   if (dist <= PLAYER_RANGE) {
     score++;
-    lastHitFrame = frameCount;
+    // lastHitFrame is less useful with dt, but we can use time or just increment
   }
 }
 
@@ -307,8 +357,9 @@ function loseGame(reason) {
   uiStatus.style.color = "#f44";
 }
 
-function updateAI() {
-  enemy.x += ENEMY_SPEED * enemyPatrolDirection;
+function updateAI(dt) {
+  const moveStep = ENEMY_SPEED * dt;
+  enemy.x += moveStep * enemyPatrolDirection;
   
   if (enemy.x >= patrolZoneMax) {
     enemyPatrolDirection = -1;
@@ -321,25 +372,78 @@ function updateAI() {
   // Update Y based on lane
   enemy.y = getLaneY(enemy.x);
 
+  // Ahri Q Logic
+  if (gameMode === "ahri_dodge") {
+      if (ahriOrb.active) {
+          const orbStep = ORB_SPEED * dt;
+          
+          if (ahriOrb.state === 'out') {
+              const dx = ahriOrb.targetX - ahriOrb.x;
+              const dy = ahriOrb.targetY - ahriOrb.y;
+              const dist = Math.hypot(dx, dy);
+              
+              if (dist < orbStep) {
+                  ahriOrb.x = ahriOrb.targetX;
+                  ahriOrb.y = ahriOrb.targetY;
+                  ahriOrb.state = 'return';
+              } else {
+                  ahriOrb.x += (dx / dist) * orbStep;
+                  ahriOrb.y += (dy / dist) * orbStep;
+              }
+          } else if (ahriOrb.state === 'return') {
+              const dx = enemy.x - ahriOrb.x;
+              const dy = enemy.y - ahriOrb.y;
+              const dist = Math.hypot(dx, dy);
+              
+              if (dist < orbStep) {
+                  ahriOrb.active = false;
+                  enemyAttackTimer = 1.0; // Cooldown
+              } else {
+                  ahriOrb.x += (dx / dist) * orbStep;
+                  ahriOrb.y += (dy / dist) * orbStep;
+              }
+          }
+          
+          // Collision
+          const distPlayer = Math.hypot(player.x - ahriOrb.x, player.y - ahriOrb.y);
+          if (distPlayer < 20 + ahriOrb.radius) { // Player radius approx 20
+              loseGame("Ahri Q'suna yakalandın!");
+          }
+      } else {
+          if (enemyAttackTimer > 0) {
+              enemyAttackTimer -= dt;
+          } else {
+              ahriOrb.active = true;
+              ahriOrb.x = enemy.x;
+              ahriOrb.y = enemy.y;
+              ahriOrb.state = 'out';
+              ahriOrb.targetX = player.x;
+              ahriOrb.targetY = player.y;
+              
+              // Extend target slightly to ensure it crosses player pos? 
+              // Ahri Q goes to target point. If player stands still, it hits.
+          }
+      }
+  }
+
   const dist = Math.hypot(player.x - enemy.x, player.y - enemy.y);
   if (dist <= ENEMY_RANGE) {
     loseGame("Rakip menziline girdi!");
   }
 }
 
-function update() {
+function update(dt) {
   if (gameState !== "playing") return;
-
-  frameCount++;
 
   // Player Move (2D movement)
   const dx = player.targetX - player.x;
   const dy = player.targetY - player.y;
   const distMove = Math.hypot(dx, dy);
+  const step = PLAYER_SPEED * dt;
   
-  if (distMove > PLAYER_SPEED) {
-    player.x += (dx / distMove) * PLAYER_SPEED;
-    player.y += (dy / distMove) * PLAYER_SPEED;
+  if (distMove > step) {
+    player.x += (dx / distMove) * step;
+    player.y += (dy / distMove) * step;
   } else {
     player.x = player.targetX;
     player.y = player.targetY;
@@ -351,14 +455,14 @@ function update() {
   player.y = clamped.y;
 
   // AI Move
-  updateAI();
+  updateAI(dt);
 
   const dist = Math.hypot(player.x - enemy.x, player.y - enemy.y);
   const inPlayerRange = dist <= PLAYER_RANGE;
 
   enemyWasInPlayerRange = inPlayerRange;
 
-  if (playerAttackTimer > 0) playerAttackTimer--;
+  if (playerAttackTimer > 0) playerAttackTimer -= dt;
   if (scoreDisplay) scoreDisplay.innerText = "Skor: " + score;
 }
 
@@ -443,6 +547,17 @@ function draw() {
   ctx.fillStyle = enemy.color;
   ctx.fill();
   
+  // Ahri Orb
+  if (gameMode === "ahri_dodge" && ahriOrb.active) {
+    ctx.beginPath();
+    ctx.arc(ahriOrb.x, ahriOrb.y, ahriOrb.radius, 0, Math.PI*2);
+    ctx.fillStyle = "#0ff"; // Cyan
+    ctx.shadowBlur = 10;
+    ctx.shadowColor = "#0ff";
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+  
   // Player Entity
   ctx.beginPath();
   ctx.arc(player.x, player.y, 20, 0, Math.PI*2);
@@ -482,14 +597,24 @@ function draw() {
     ctx.font = "16px Arial";
     ctx.fillText("Yeniden başlamak için SPACE tuşuna bas", cw/2, ch/2 + 30);
   }
-  
-  requestAnimationFrame(draw);
 }
 
 // Loop
-setInterval(update, 1000/60);
+function gameLoop(timestamp) {
+  if (!lastTime) lastTime = timestamp;
+  const dt = (timestamp - lastTime) / 1000;
+  lastTime = timestamp;
+  
+  // Cap dt
+  const safeDt = Math.min(dt, 0.1);
+
+  update(safeDt);
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
 resize();
-requestAnimationFrame(draw);
+requestAnimationFrame(gameLoop);
 
 </script>
 </body>
