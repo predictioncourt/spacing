@@ -77,9 +77,8 @@ const ctx = canvas.getContext("2d");
 
 // ---------------- STATE (GLOBAL) ----------------
 let cw, ch; // Canvas width/height
-let laneY;  // Y position of the lane
 let player = { x: 0, y: 0, targetX: 0, targetY: 0, color: "#4f8" };
-let enemy = { x: 0, color: "#f44" };
+let enemy = { x: 0, y: 0, color: "#f44" };
 let gameState = "start"; // start, playing, lose
 let keys = {};
 let keyBindings = { range: 'a' };
@@ -95,6 +94,8 @@ let enemyPatrolDirection = 1;
 let patrolZoneMin = 0;
 let patrolZoneMax = 0;
 let tooFarTimer = 0;
+let laneStart = { x: 0, y: 0 };
+let laneEnd = { x: 0, y: 0 };
 
 // ---------------- DOM ELEMENTS ----------------
 const uiStatus = document.getElementById("status");
@@ -118,6 +119,7 @@ const TOO_FAR_FRAMES = 150;
 const MISSED_OPPORTUNITY_GRACE_FRAMES = 25;
 const PATROL_ZONE_MIN_RATIO = 0.35;
 const PATROL_ZONE_MAX_RATIO = 0.65;
+const LANE_WIDTH = 180; // Width of the lane (vertical offset from center)
 
 // ---------------- EVENT LISTENERS (UI) ----------------
 settingsBtn.addEventListener("click", () => {
@@ -168,11 +170,37 @@ function updateLevelUI() {
 function resize() {
   cw = canvas.width = window.innerWidth;
   ch = canvas.height = window.innerHeight;
-  laneY = ch / 2;
+  
+  // Define Lane (Diagonal from bottom-left to top-right)
+  // Roughly start near bottom-left, end near top-right
+  laneStart = { x: 0, y: ch * 0.85 };
+  laneEnd = { x: cw, y: ch * 0.15 };
   
   if (gameState === "start") resetGame();
 }
 window.addEventListener("resize", resize);
+
+function getLaneY(x) {
+  // Linear interpolation: y = mx + c
+  // m = (y2 - y1) / (x2 - x1)
+  const t = x / cw; // Normalized 0..1 assuming lane spans full width
+  return laneStart.y + (laneEnd.y - laneStart.y) * t;
+}
+
+function clampToLane(x, y) {
+  // Clamp X to screen
+  const cx = Math.max(0, Math.min(cw, x));
+  
+  // Calculate center Y for this X
+  const cy = getLaneY(cx);
+  
+  // Clamp Y within lane width
+  const minY = cy - LANE_WIDTH;
+  const maxY = cy + LANE_WIDTH;
+  const clampedY = Math.max(minY, Math.min(maxY, y));
+  
+  return { x: cx, y: clampedY };
+}
 
 // ---------------- INPUT (GAME) ----------------
 // Mouse Movement & Attack
@@ -181,16 +209,17 @@ window.addEventListener("mousedown", e => {
 
   // Right Click (2) -> Move
   if (e.button === 2) {
-      player.targetX = e.clientX;
-      player.targetY = laneY; // Lock to laneY
-      // Clamp to screen
-      player.targetX = Math.max(0, Math.min(cw, player.targetX));
+      // Allow 2D movement within lane
+      const clamped = clampToLane(e.clientX, e.clientY);
+      
+      player.targetX = clamped.x;
+      player.targetY = clamped.y;
   }
 
   // Left Click (0) -> ATTACK if clicked on Enemy
   if (e.button === 0) {
     // Check if clicked on enemy (with generous hitbox)
-    const distMouse = Math.hypot(e.clientX - enemy.x, e.clientY - laneY);
+    const distMouse = Math.hypot(e.clientX - enemy.x, e.clientY - enemy.y);
     if (distMouse <= 50) { // 20 radius + 30 padding
        tryAttack();
     }
@@ -232,21 +261,21 @@ function resetGame() {
     patrolZoneMin = cw * PATROL_ZONE_MIN_RATIO;
     patrolZoneMax = cw * PATROL_ZONE_MAX_RATIO;
   } else {
-    // Level 2: 50% narrower patrol zone
-    // Original width is 0.30 (0.65 - 0.35)
-    // New width should be 0.15
-    // Center is 0.50
+    // Level 2: Narrower patrol zone
     const center = 0.5;
-    const halfWidth = 0.075; // 0.15 / 2
+    const halfWidth = 0.075;
     patrolZoneMin = cw * (center - halfWidth);
     patrolZoneMax = cw * (center + halfWidth);
   }
 
   player.x = cw * 0.2;
-  player.y = laneY;
+  player.y = getLaneY(player.x);
   player.targetX = player.x;
   player.targetY = player.y;
+  
   enemy.x = patrolZoneMin;
+  enemy.y = getLaneY(enemy.x);
+  
   enemyPatrolDirection = 1;
   gameState = "playing";
   uiStatus.innerText = "Dövüş Başladı!";
@@ -264,7 +293,7 @@ function tryAttack() {
   if (playerAttackTimer > 0) return;
   
   playerAttackTimer = 15;
-  const dist = Math.abs(player.x - enemy.x);
+  const dist = Math.hypot(player.x - enemy.x, player.y - enemy.y);
   
   if (dist <= PLAYER_RANGE) {
     score++;
@@ -279,9 +308,8 @@ function loseGame(reason) {
 }
 
 function updateAI() {
-  const dist = Math.abs(player.x - enemy.x);
-
   enemy.x += ENEMY_SPEED * enemyPatrolDirection;
+  
   if (enemy.x >= patrolZoneMax) {
     enemyPatrolDirection = -1;
     enemy.x = patrolZoneMax;
@@ -289,7 +317,11 @@ function updateAI() {
     enemyPatrolDirection = 1;
     enemy.x = patrolZoneMin;
   }
+  
+  // Update Y based on lane
+  enemy.y = getLaneY(enemy.x);
 
+  const dist = Math.hypot(player.x - enemy.x, player.y - enemy.y);
   if (dist <= ENEMY_RANGE) {
     loseGame("Rakip menziline girdi!");
   }
@@ -300,49 +332,31 @@ function update() {
 
   frameCount++;
 
-  // Player Move (Towards Target) - Updated for both x and y
+  // Player Move (2D movement)
   const dx = player.targetX - player.x;
-  if (Math.abs(dx) > PLAYER_SPEED) {
-    player.x += Math.sign(dx) * PLAYER_SPEED;
+  const dy = player.targetY - player.y;
+  const distMove = Math.hypot(dx, dy);
+  
+  if (distMove > PLAYER_SPEED) {
+    player.x += (dx / distMove) * PLAYER_SPEED;
+    player.y += (dy / distMove) * PLAYER_SPEED;
   } else {
     player.x = player.targetX;
+    player.y = player.targetY;
   }
-  player.x = Math.max(0, Math.min(cw, player.x));
+  
+  // Ensure player stays in lane (extra safety)
+  const clamped = clampToLane(player.x, player.y);
+  player.x = clamped.x;
+  player.y = clamped.y;
 
-  const dy = player.targetY - player.y;
-  // Vertical movement disabled
-  player.y = laneY;
-
-  // AI Move (Fail 1 checked inside updateAI)
+  // AI Move
   updateAI();
 
-  const dist = Math.abs(player.x - enemy.x);
+  const dist = Math.hypot(player.x - enemy.x, player.y - enemy.y);
   const inPlayerRange = dist <= PLAYER_RANGE;
 
-  // Fail 2: Enemy just exited our range and we didn't hit during their visit - REMOVED
-  /*
-  if (enemyWasInPlayerRange && !inPlayerRange) {
-    const hitRecently = (frameCount - lastHitFrame) <= MISSED_OPPORTUNITY_GRACE_FRAMES;
-    if (!hitRecently) {
-      loseGame("Kaçırılan fırsat – menzilde vurmadın!");
-      return;
-    }
-  }
-  */
   enemyWasInPlayerRange = inPlayerRange;
-
-  // Fail 3: Too far for too long (spacing broken) - REMOVED
-  /*
-  if (dist > PLAYER_RANGE + TOO_FAR_MARGIN) {
-    tooFarTimer++;
-    if (tooFarTimer >= TOO_FAR_FRAMES) {
-      loseGame("Çok geri kaçtın – spacing bozuldu!");
-      return;
-    }
-  } else {
-    tooFarTimer = 0;
-  }
-  */
 
   if (playerAttackTimer > 0) playerAttackTimer--;
   if (scoreDisplay) scoreDisplay.innerText = "Skor: " + score;
@@ -354,30 +368,64 @@ function draw() {
   ctx.fillStyle = "#1a1a1a";
   ctx.fillRect(0, 0, cw, ch);
   
-  // Lane
+  // Draw Diagonal Lane
+  ctx.save();
+  ctx.beginPath();
+  
+  ctx.moveTo(0, laneStart.y - LANE_WIDTH);
+  ctx.lineTo(cw, laneEnd.y - LANE_WIDTH);
+  ctx.lineTo(cw, laneEnd.y + LANE_WIDTH);
+  ctx.lineTo(0, laneStart.y + LANE_WIDTH);
+  ctx.closePath();
+  
+  ctx.fillStyle = "rgba(40, 40, 50, 0.5)";
+  ctx.fill();
+  
   ctx.strokeStyle = "#444";
   ctx.lineWidth = 2;
+  
+  // Draw center line
   ctx.beginPath();
-  ctx.moveTo(0, laneY);
-  ctx.lineTo(cw, laneY);
+  ctx.moveTo(laneStart.x, laneStart.y);
+  ctx.lineTo(laneEnd.x, laneEnd.y);
+  ctx.setLineDash([10, 20]);
+  ctx.strokeStyle = "#333";
   ctx.stroke();
+  ctx.setLineDash([]);
+  
+  // Draw borders
+  ctx.beginPath();
+  ctx.moveTo(0, laneStart.y - LANE_WIDTH);
+  ctx.lineTo(cw, laneEnd.y - LANE_WIDTH);
+  ctx.strokeStyle = "#555";
+  ctx.stroke();
+  
+  ctx.beginPath();
+  ctx.moveTo(0, laneStart.y + LANE_WIDTH);
+  ctx.lineTo(cw, laneEnd.y + LANE_WIDTH);
+  ctx.stroke();
+  
+  ctx.restore();
 
-  // Patrol zone (rakibin devriye alanı)
+  // Patrol zone (rakibin devriye alanı) - visualized on the lane
   if (patrolZoneMax > patrolZoneMin) {
+    const pMinY = getLaneY(patrolZoneMin);
+    const pMaxY = getLaneY(patrolZoneMax);
+    
     ctx.fillStyle = "rgba(255, 80, 80, 0.08)";
-    ctx.fillRect(patrolZoneMin, 0, patrolZoneMax - patrolZoneMin, ch);
-    ctx.strokeStyle = "rgba(255, 100, 100, 0.5)";
-    ctx.lineWidth = 1;
+    // Polygon for patrol zone
     ctx.beginPath();
-    ctx.moveTo(patrolZoneMin, 0);
-    ctx.lineTo(patrolZoneMin, ch);
-    ctx.moveTo(patrolZoneMax, 0);
-    ctx.lineTo(patrolZoneMax, ch);
-    ctx.stroke();
+    ctx.moveTo(patrolZoneMin, pMinY - LANE_WIDTH);
+    ctx.lineTo(patrolZoneMax, pMaxY - LANE_WIDTH);
+    ctx.lineTo(patrolZoneMax, pMaxY + LANE_WIDTH);
+    ctx.lineTo(patrolZoneMin, pMinY + LANE_WIDTH);
+    ctx.fill();
+    
+    // Vertical markers for patrol limits? No, just the colored zone is enough
   }
 
-  // Draw Movement Target (Click Marker) - Updated to show at targetY
-  if (gameState === "playing" && (Math.abs(player.x - player.targetX) > 5 || Math.abs(player.y - player.targetY) > 5)) {
+  // Draw Movement Target
+  if (gameState === "playing" && (Math.abs(player.x - player.targetX) > 5)) {
     ctx.strokeStyle = "rgba(100, 255, 100, 0.5)";
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -389,38 +437,20 @@ function draw() {
     ctx.stroke();
   }
   
-  // Draw Ranges (Visual Aid)
-  // Only show ranges if game is active or ended
-  
-  // We need to draw entities relative to their positions
-  
-  // 1. Enemy range ring (danger zone) - HIDDEN
-  /*
-  ctx.strokeStyle = "rgba(255, 80, 80, 0.6)";
-  ctx.lineWidth = 2;
-  ctx.setLineDash([4, 4]);
-  ctx.beginPath();
-  ctx.arc(enemy.x, laneY, ENEMY_RANGE, 0, Math.PI*2);
-  ctx.stroke();
-  ctx.setLineDash([]);
-  */
-
   // Enemy Entity
   ctx.beginPath();
-  ctx.arc(enemy.x, laneY, 20, 0, Math.PI*2);
+  ctx.arc(enemy.x, enemy.y, 20, 0, Math.PI*2);
   ctx.fillStyle = enemy.color;
   ctx.fill();
   
-  // 2. Draw Player - Updated to use player.y
+  // Player Entity
   ctx.beginPath();
   ctx.arc(player.x, player.y, 20, 0, Math.PI*2);
   ctx.fillStyle = player.color;
   ctx.fill();
   
-  // Player Attack Visual (Only visible when attacking or aiming)
-  // Show range if Range Key is held
+  // Player Attack Visual
   if (keys[keyBindings.range] || playerAttackTimer > 0) {
-    // Draw Attack Range (Flash) - Updated to use player.y
     ctx.fillStyle = playerAttackTimer > 0 ? "rgba(100, 255, 100, 0.3)" : "rgba(100, 255, 100, 0.05)";
     ctx.beginPath();
     ctx.arc(player.x, player.y, PLAYER_RANGE, 0, Math.PI*2);
@@ -432,7 +462,6 @@ function draw() {
         ctx.stroke();
     }
     
-    // Range Indicator Border - Updated to use player.y
     ctx.strokeStyle = "rgba(100, 255, 100, 0.8)";
     ctx.setLineDash([5, 5]);
     ctx.beginPath();
@@ -441,9 +470,7 @@ function draw() {
     ctx.setLineDash([]);
   }
   
-  // Connect line - REMOVED
-  
-  // Overlay for End Screen (lose only – no win state)
+  // Lose Screen
   if (gameState === "lose") {
     ctx.fillStyle = "rgba(0,0,0,0.5)";
     ctx.fillRect(0, 0, cw, ch);
