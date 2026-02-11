@@ -62,8 +62,9 @@
   
   <h3 style="margin-top: 0; color: #fff;">Zorluk Seviyesi</h3>
   <div style="margin-bottom: 20px; color: #ddd;">
-    <button id="lvl1-btn" class="key" style="cursor: pointer; font-size: 16px; background: #4f8; color: #111; border-color: #4f8;">SEVİYE 1</button>
+    <button id="lvl1-btn" class="key" style="cursor: pointer; font-size: 16px;">SEVİYE 1</button>
     <button id="lvl2-btn" class="key" style="cursor: pointer; font-size: 16px; margin-left: 10px;">SEVİYE 2</button>
+    <button id="lvl3-btn" class="key" style="cursor: pointer; font-size: 16px; margin-left: 10px;">SEVİYE 3</button>
   </div>
 
   <h3 style="margin-top: 0; color: #fff;">Oyun Modu</h3>
@@ -129,6 +130,7 @@ const settingsModal = document.getElementById("settings-modal");
 const rebindBtn = document.getElementById("rebind-btn");
 const lvl1Btn = document.getElementById("lvl1-btn");
 const lvl2Btn = document.getElementById("lvl2-btn");
+const lvl3Btn = document.getElementById("lvl3-btn");
 const modeNormalBtn = document.getElementById("mode-normal-btn");
 const modeAhriBtn = document.getElementById("mode-ahri-btn");
 const minionModeBtn = document.getElementById("minion-mode-btn");
@@ -185,6 +187,12 @@ lvl2Btn.addEventListener("click", () => {
   resetGame();
 });
 
+lvl3Btn.addEventListener("click", () => {
+  currentLevel = 3;
+  updateLevelUI();
+  resetGame();
+});
+
 modeNormalBtn.addEventListener("click", () => {
   gameMode = "normal";
   updateModeUI();
@@ -215,20 +223,25 @@ function updateLevelUI() {
     levelDisplay.innerText = text;
   }
   
+  // Reset colors
+  [lvl1Btn, lvl2Btn, lvl3Btn].forEach(btn => {
+    btn.style.background = "#333";
+    btn.style.color = "#ddd";
+    btn.style.borderColor = "#555";
+  });
+
   if (currentLevel === 1) {
     lvl1Btn.style.background = "#4f8";
     lvl1Btn.style.color = "#111";
     lvl1Btn.style.borderColor = "#4f8";
-    lvl2Btn.style.background = "#333";
-    lvl2Btn.style.color = "#ddd";
-    lvl2Btn.style.borderColor = "#555";
-  } else {
+  } else if (currentLevel === 2) {
     lvl2Btn.style.background = "#f44";
     lvl2Btn.style.color = "#111";
     lvl2Btn.style.borderColor = "#f44";
-    lvl1Btn.style.background = "#333";
-    lvl1Btn.style.color = "#ddd";
-    lvl1Btn.style.borderColor = "#555";
+  } else if (currentLevel === 3) {
+    lvl3Btn.style.background = "#94f"; // Purple for level 3
+    lvl3Btn.style.color = "#fff";
+    lvl3Btn.style.borderColor = "#94f";
   }
 }
 
@@ -375,13 +388,26 @@ window.addEventListener("keyup", e => {
 function resetGame() {
   if (gameMode === "ahri_dodge") {
     // Ahri mode: Far right (end of diagonal), wider patrol zone
-    // Lane goes 0 to cw.
-    // Center 0.85, width significantly increased
-    const center = 0.68; 
-    const halfWidth = 0.14; // Increased from 0.08 to 0.15
-    patrolZoneMin = cw * (center - halfWidth);
-    patrolZoneMax = cw * (center + halfWidth);
-    missedMinions = 0; // Reset missed counter
+    // Level 1 vs Level 2 logic
+    if (currentLevel === 1) {
+        const center = 0.68; 
+        const halfWidth = 0.14; 
+        patrolZoneMin = cw * (center - halfWidth);
+        patrolZoneMax = cw * (center + halfWidth);
+    } else if (currentLevel === 2) {
+         // Level 2: Custom settings
+         const center = 0.65;
+         const halfWidth = 0.12;
+         patrolZoneMin = cw * (center - halfWidth);
+         patrolZoneMax = cw * (center + halfWidth);
+     } else {
+         // Level 3: Hardcore settings
+         const center = 0.55;
+         const halfWidth = 0.10;
+         patrolZoneMin = cw * (center - halfWidth);
+         patrolZoneMax = cw * (center + halfWidth);
+     }
+     missedMinions = 0; // Reset missed counter
   } else if (currentLevel === 1) {
     patrolZoneMin = cw * PATROL_ZONE_MIN_RATIO;
     patrolZoneMax = cw * PATROL_ZONE_MAX_RATIO;
@@ -546,7 +572,11 @@ function updateAI(dt) {
               
               if (dist < orbStep) {
                   ahriOrb.active = false;
-                  enemyAttackTimer = 1.0; // Reset timer
+                  // Seviye 3'te bekleme süresi 0.6s, Seviye 2'de 0.8s, Seviye 1'de 1.0s
+                  let cooldown = 1.0;
+                  if (currentLevel === 3) cooldown = 0.6;
+                  else if (currentLevel === 2) cooldown = 0.8;
+                  enemyAttackTimer = cooldown; 
                   ahriOrb.warning = false; // Reset warning
               } else {
                   ahriOrb.x += (dx / dist) * orbStep;
@@ -608,7 +638,12 @@ function updateAI(dt) {
   if (minionMode) {
       minionSpawnTimer -= dt;
       if (minionSpawnTimer <= 0) {
-          minionSpawnTimer = MINION_SPAWN_RATE;
+          // Seviye 3'te daha da hızlı (4.0s), Seviye 2'de 5.5s, Seviye 1'de 7.5s
+          let spawnRate = MINION_SPAWN_RATE;
+          if (currentLevel === 3) spawnRate = 4.0;
+          else if (currentLevel === 2) spawnRate = 5.5;
+          
+          minionSpawnTimer = spawnRate;
           
           // Spawn minion wave (2 or 3)
           const waveSize = Math.floor(Math.random() * 2) + 2; // Randomly 2 or 3
