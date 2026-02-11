@@ -38,11 +38,11 @@
 <div id="ui">
   <h1 style="margin: 0; font-size: 24px;">SPACING DUEL</h1>
   <div style="margin-top: 10px; font-size: 16px;">
-    Hareket: <span class="key">Sağ Tık (Mouse)</span>
+    Hareket: <span class="key">Sağ Tık</span>
+    &nbsp;|&nbsp; 
+    Skiller: <span class="key">Q</span> / <span class="key">W</span>
     &nbsp;|&nbsp; 
     Menzil: <span class="key" id="range-key-display">A</span>
-    &nbsp;|&nbsp; 
-    Saldırı: <span class="key">Rakibe Sol Tık</span>
   </div>
   <div id="status" style="margin-top: 20px; font-size: 18px; color: #aaa;">Hazır ol...</div>
   <div id="score-display" style="margin-top: 5px; font-size: 16px; color: #8cf;">Skor: 0</div>
@@ -113,8 +113,12 @@ let lastTime = 0;
 let ahriOrb = { active: false, warning: false, warningTimer: 0, x: 0, y: 0, targetX: 0, targetY: 0, returnTarget: null, state: 'out', radius: 15 };
 let minions = [];
 let playerProjectiles = [];
+let wEffects = []; // New: Brand W effects
 let playerQCooldown = 0;
+let playerWCooldown = 0; // New: W cooldown
 let minionSpawnTimer = 0;
+let missedMinions = 0; // Counter for missed minions in Ahri Dodge mode
+const MAX_MISSED_MINIONS = 3;
 
 // ---------------- DOM ELEMENTS ----------------
 const uiStatus = document.getElementById("status");
@@ -139,8 +143,15 @@ const ENEMY_SPEED = 240; // px per second
 const ORB_SPEED = 500; // px per second
 const PROJECTILE_SPEED = 600; // px per second
 const MINION_SPEED = 100; // px per second
-const MINION_SPAWN_RATE = 3.0; // seconds
+const MINION_SPAWN_RATE = 7.5; // seconds (7-8s average)
 const PLAYER_Q_COOLDOWN = 0.5; // seconds
+const PLAYER_W_COOLDOWN = 3.0; // seconds for W
+const Q_DAMAGE = 300;
+const W_DAMAGE = 300;
+const W_RADIUS = 90;
+const W_DELAY = 0.6; // Brand W delay
+const MINION_MAX_HP = 500;
+const MINION_PASSIVE_DAMAGE = 100; // per second
 const TOO_FAR_MARGIN = 80;
 const TOO_FAR_FRAMES = 2.5; // seconds
 const MISSED_OPPORTUNITY_GRACE_FRAMES = 0.4; // seconds
@@ -193,7 +204,16 @@ minionModeBtn.addEventListener("click", () => {
 });
 
 function updateLevelUI() {
-  if (levelDisplay) levelDisplay.innerText = "Seviye: " + currentLevel + " | Mod: " + (gameMode === "normal" ? "Normal" : "Ahri Dodge") + (minionMode ? " + Minyonlar" : "");
+  if (levelDisplay) {
+    let text = "Seviye: " + currentLevel + " | Mod: " + (gameMode === "normal" ? "Normal" : "Ahri Dodge");
+    if (minionMode) {
+      text += " + Minyonlar";
+      if (gameMode === "ahri_dodge") {
+        text += " | Kaçan: " + missedMinions + "/" + MAX_MISSED_MINIONS;
+      }
+    }
+    levelDisplay.innerText = text;
+  }
   
   if (currentLevel === 1) {
     lvl1Btn.style.background = "#4f8";
@@ -323,6 +343,11 @@ window.addEventListener("keydown", e => {
   if (minionMode && gameState === "playing" && e.key.toLowerCase() === 'q') {
       tryFireProjectile();
   }
+  
+  // W AoE Skill (Brand W)
+  if (minionMode && gameState === "playing" && e.key.toLowerCase() === 'w') {
+      tryFireW();
+  }
 
   // Rebinding Logic
   if (isRebinding) {
@@ -352,10 +377,11 @@ function resetGame() {
     // Ahri mode: Far right (end of diagonal), wider patrol zone
     // Lane goes 0 to cw.
     // Center 0.85, width significantly increased
-    const center = 0.85; 
-    const halfWidth = 0.20; // Increased from 0.08 to 0.15
+    const center = 0.68; 
+    const halfWidth = 0.14; // Increased from 0.08 to 0.15
     patrolZoneMin = cw * (center - halfWidth);
     patrolZoneMax = cw * (center + halfWidth);
+    missedMinions = 0; // Reset missed counter
   } else if (currentLevel === 1) {
     patrolZoneMin = cw * PATROL_ZONE_MIN_RATIO;
     patrolZoneMax = cw * PATROL_ZONE_MAX_RATIO;
@@ -379,7 +405,9 @@ function resetGame() {
   ahriOrb.warning = false;
   minions = [];
   playerProjectiles = [];
+  wEffects = [];
   playerQCooldown = 0;
+  playerWCooldown = 0;
   minionSpawnTimer = 0;
   
   enemyPatrolDirection = 1;
@@ -432,7 +460,24 @@ function tryFireProjectile() {
         y: player.y,
         vx: (dx / mag) * PROJECTILE_SPEED,
         vy: (dy / mag) * PROJECTILE_SPEED,
-        radius: 6,
+        radius: 8,
+        damage: Q_DAMAGE,
+        active: true
+    });
+}
+
+function tryFireW() {
+    if (playerWCooldown > 0) return;
+    
+    playerWCooldown = PLAYER_W_COOLDOWN;
+    
+    wEffects.push({
+        x: mouseX,
+        y: mouseY,
+        timer: W_DELAY,
+        radius: W_RADIUS,
+        damage: W_DAMAGE,
+        exploded: false,
         active: true
     });
 }
@@ -456,7 +501,13 @@ function loseGame(reason) {
 }
 
 function updateAI(dt) {
-  const moveStep = ENEMY_SPEED * dt;
+  // Speed boost in Ahri mode
+  let speed = ENEMY_SPEED;
+  if (gameMode === "ahri_dodge") {
+      speed *= 2.0; // Much faster side-to-side
+  }
+
+  const moveStep = speed * dt;
   enemy.x += moveStep * enemyPatrolDirection;
   
   if (enemy.x >= patrolZoneMax) {
@@ -508,6 +559,12 @@ function updateAI(dt) {
           if (distPlayer < 20 + ahriOrb.radius) { // Player radius approx 20
               loseGame("Ahri Q'suna yakalandın!");
           }
+          
+          // Minion Collision with Ahri Q (Ahri's Q destroys minions if they reach it/it reaches them?)
+          // User said: "buna ahrinin menziline ulaştıklarında kayboldukları... dahil edilecek"
+          // This implies minions disappearing when they reach Ahri/Q max range, NOT Ahri Q killing them.
+          // BUT: "q yediğinde can barı yarıya düşsün hani 2qda ölüyorlar ya 2.qta yok olcaklar zaten"
+          // This refers to PLAYER Q. "biz öldürmeden yok olurlarsa" -> Minions reaching destination.
       } else {
           // Cooldown phase
           if (enemyAttackTimer > 0) {
@@ -553,33 +610,48 @@ function updateAI(dt) {
       if (minionSpawnTimer <= 0) {
           minionSpawnTimer = MINION_SPAWN_RATE;
           
-          // Spawn minion
-          // Logic: "ahrinin biraz daha solundan gelsin" -> Left of Patrol Zone Min
-          // Use patrolZoneMin as reference if in Ahri mode, else use laneEnd
-          
-          let spawnX;
-          if (gameMode === "ahri_dodge") {
-              spawnX = patrolZoneMin - 50; // 50px left of Ahri's area
-          } else {
-              spawnX = laneEnd.x;
+          // Spawn minion wave (2 or 3)
+          const waveSize = Math.floor(Math.random() * 2) + 2; // Randomly 2 or 3
+
+          for (let i = 0; i < waveSize; i++) {
+              // Logic: "ahrinin biraz daha solundan gelsin" -> Left of Patrol Zone Min
+              // Use patrolZoneMin as reference if in Ahri mode, else use laneEnd
+              
+              let baseSpawnX;
+              if (gameMode === "ahri_dodge") {
+                  baseSpawnX = patrolZoneMin - 50; // 50px left of Ahri's area
+              } else {
+                  baseSpawnX = laneEnd.x;
+              }
+
+              // Stagger them slightly in X so they don't overlap perfectly if Y is similar
+              // or just to make them look like a group
+              const offsetX = i * 30; 
+              const spawnX = baseSpawnX + offsetX;
+              
+              const spawnYCenter = getLaneY(spawnX);
+              
+              minions.push({
+                  x: spawnX,
+                  y: spawnYCenter + (Math.random() * LANE_WIDTH * 1.5 - LANE_WIDTH * 0.75), // Random Y in lane
+                  hp: MINION_MAX_HP,
+                  maxHp: MINION_MAX_HP,
+                  radius: 12,
+                  active: true
+              });
           }
-          
-          const spawnYCenter = getLaneY(spawnX);
-          
-          minions.push({
-              x: spawnX,
-              y: spawnYCenter + (Math.random() * LANE_WIDTH * 1.5 - LANE_WIDTH * 0.75), // Random Y in lane
-              hp: 2,
-              radius: 12,
-              active: true
-          });
       }
       
       // Update Minions
       for (let i = minions.length - 1; i >= 0; i--) {
           let m = minions[i];
-          // Move towards left (along the lane)
-          // Actually lane is diagonal, so we need to move along the lane vector.
+          
+          // Eğer minyon zaten pasifse (oyuncu öldürdüyse) listeden çıkar ve devam et
+          if (!m.active) {
+              minions.splice(i, 1);
+              continue;
+          }
+
           const laneDx = laneStart.x - laneEnd.x;
           const laneDy = laneStart.y - laneEnd.y;
           const laneLen = Math.hypot(laneDx, laneDy);
@@ -587,10 +659,48 @@ function updateAI(dt) {
           m.x += (laneDx / laneLen) * MINION_SPEED * dt;
           m.y += (laneDy / laneLen) * MINION_SPEED * dt;
           
-          if (m.x < -50) m.active = false;
+          // Passive damage (100 per second)
+          m.hp -= MINION_PASSIVE_DAMAGE * dt;
           
-          if (!m.active) {
-              minions.splice(i, 1);
+          if (m.hp <= 0) {
+              m.active = false;
+              loseGame("Minyonu zamanında öldüremedin!");
+              continue;
+          }
+
+          // Check if missed (reached far left)
+          if (m.x < 50) { 
+             m.active = false;
+             loseGame("Minyon hattı yardı!");
+             continue;
+          }
+      }
+      
+      // Update W Effects
+      if (playerWCooldown > 0) playerWCooldown -= dt;
+      for (let i = wEffects.length - 1; i >= 0; i--) {
+          let w = wEffects[i];
+          w.timer -= dt;
+          
+          if (w.timer <= 0 && !w.exploded) {
+              w.exploded = true;
+              // Check collision with minions
+              for (let m of minions) {
+                  if (!m.active) continue;
+                  const dist = Math.hypot(w.x - m.x, w.y - m.y);
+                  if (dist < w.radius + m.radius) {
+                      m.hp -= w.damage;
+                      if (m.hp <= 0) {
+                          m.active = false;
+                          score += 10; // Bonus score for minion
+                      }
+                  }
+              }
+          }
+          
+          // Remove effect after explosion visual
+          if (w.timer < -0.4) { // 0.4s for explosion visual
+              wEffects.splice(i, 1);
           }
       }
       
@@ -607,10 +717,10 @@ function updateAI(dt) {
               if (!m.active) continue;
               const dist = Math.hypot(p.x - m.x, p.y - m.y);
               if (dist < p.radius + m.radius) {
-                  m.hp--;
+                  m.hp -= p.damage;
                   if (m.hp <= 0) {
                       m.active = false;
-                      score++; // Bonus score for minion
+                      score += 10; // Bonus score for minion
                   }
                   p.active = false;
                   break;
@@ -792,6 +902,7 @@ function draw() {
   // Minions
   if (minionMode) {
       for (let m of minions) {
+          // Minion Body
           ctx.beginPath();
           ctx.arc(m.x, m.y, m.radius, 0, Math.PI*2);
           ctx.fillStyle = "#ffaaaa";
@@ -799,6 +910,58 @@ function draw() {
           ctx.strokeStyle = "#a33";
           ctx.lineWidth = 1;
           ctx.stroke();
+
+          // HP Bar
+          const barWidth = 30;
+          const barHeight = 5;
+          const barX = m.x - barWidth / 2;
+          const barY = m.y - m.radius - 10;
+          
+          // Background
+          ctx.fillStyle = "#333";
+          ctx.fillRect(barX, barY, barWidth, barHeight);
+          
+          // Foreground
+          const hpRatio = Math.max(0, m.hp / m.maxHp);
+          ctx.fillStyle = hpRatio > 0.3 ? "#4f8" : "#f44";
+          ctx.fillRect(barX, barY, barWidth * hpRatio, barHeight);
+          
+          // Border
+          ctx.strokeStyle = "#000";
+          ctx.lineWidth = 1;
+          ctx.strokeRect(barX, barY, barWidth, barHeight);
+      }
+      
+      // W Effects
+      for (let w of wEffects) {
+          if (!w.exploded) {
+              // Pre-explosion indicator
+              ctx.beginPath();
+              ctx.arc(w.x, w.y, w.radius, 0, Math.PI * 2);
+              ctx.strokeStyle = "rgba(255, 100, 0, 0.8)";
+              ctx.setLineDash([5, 5]);
+              ctx.lineWidth = 2;
+              ctx.stroke();
+              ctx.setLineDash([]);
+              
+              // Fill rising
+              const fillRatio = 1 - (w.timer / W_DELAY);
+              ctx.fillStyle = "rgba(255, 100, 0, 0.2)";
+              ctx.beginPath();
+              ctx.arc(w.x, w.y, w.radius * fillRatio, 0, Math.PI * 2);
+              ctx.fill();
+          } else {
+              // Explosion visual
+              const alpha = Math.max(0, 1 + w.timer * 2.5); // w.timer goes from 0 to -0.4
+              ctx.fillStyle = `rgba(255, 150, 0, ${alpha})`;
+              ctx.beginPath();
+              ctx.arc(w.x, w.y, w.radius, 0, Math.PI * 2);
+              ctx.fill();
+              
+              ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
+              ctx.lineWidth = 3;
+              ctx.stroke();
+          }
       }
       
       // Projectiles
